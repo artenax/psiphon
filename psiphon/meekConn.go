@@ -44,6 +44,7 @@ import (
 	"github.com/Psiphon-Labs/psiphon-tunnel-core/psiphon/common/prng"
 	"github.com/Psiphon-Labs/psiphon-tunnel-core/psiphon/common/protocol"
 	"github.com/Psiphon-Labs/psiphon-tunnel-core/psiphon/common/quic"
+	"github.com/Psiphon-Labs/psiphon-tunnel-core/psiphon/common/values"
 	"github.com/Psiphon-Labs/psiphon-tunnel-core/psiphon/upstreamproxy"
 	"golang.org/x/crypto/nacl/box"
 	"golang.org/x/net/http2"
@@ -211,10 +212,12 @@ type MeekConn struct {
 	url                       *url.URL
 	additionalHeaders         http.Header
 	cookie                    *http.Cookie
+	contentType               string
 	cookieSize                int
 	tlsPadding                int
 	limitRequestPayloadLength int
 	redialTLSProbability      float64
+	underlyingDialer          common.Dialer
 	cachedTLSDialer           *cachedTLSDialer
 	transport                 transporter
 	mutex                     sync.Mutex
@@ -222,6 +225,7 @@ type MeekConn struct {
 	runCtx                    context.Context
 	stopRunning               context.CancelFunc
 	relayWaitGroup            *sync.WaitGroup
+	firstUnderlyingConn       net.Conn
 
 	// For MeekModeObfuscatedRoundTrip
 	meekCookieEncryptionPublicKey string
@@ -314,6 +318,7 @@ func DialMeek(
 	if meek.mode == MeekModeRelay {
 		var err error
 		meek.cookie,
+			meek.contentType,
 			meek.tlsPadding,
 			meek.limitRequestPayloadLength,
 			meek.redialTLSProbability,
@@ -415,10 +420,12 @@ func DialMeek(
 
 		scheme = "https"
 
+		meek.initUnderlyingDialer(dialConfig)
+
 		tlsConfig := &CustomTLSConfig{
 			Parameters:                    meekConfig.Parameters,
 			DialAddr:                      meekConfig.DialAddress,
-			Dial:                          NewTCPDialer(dialConfig),
+			Dial:                          meek.underlyingDial,
 			SNIServerName:                 meekConfig.SNIServerName,
 			SkipVerify:                    skipVerify,
 			VerifyServerName:              meekConfig.VerifyServerName,
@@ -542,7 +549,8 @@ func DialMeek(
 			*copyDialConfig = *dialConfig
 			copyDialConfig.UpstreamProxyURL = ""
 
-			dialer = NewTCPDialer(copyDialConfig)
+			meek.initUnderlyingDialer(copyDialConfig)
+			dialer = meek.underlyingDial
 
 			// In this proxy case, the destination server address is in the
 			// request line URL. net/http will render the request line using
@@ -566,7 +574,8 @@ func DialMeek(
 			// If dialConfig.UpstreamProxyURL is set, HTTP proxying via
 			// CONNECT will be used by the dialer.
 
-			baseDialer := NewTCPDialer(dialConfig)
+			meek.initUnderlyingDialer(dialConfig)
+			baseDialer := meek.underlyingDial
 
 			// The dialer ignores any address that http.Transport will pass in
 			// (derived from the HTTP request URL) and always dials
@@ -696,6 +705,28 @@ func DialMeek(
 	return meek, nil
 }
 
+func (meek *MeekConn) initUnderlyingDialer(dialConfig *DialConfig) {
+
+	// Not safe for concurrent calls; should be called only from DialMeek.
+	meek.underlyingDialer = NewTCPDialer(dialConfig)
+}
+
+func (meek *MeekConn) underlyingDial(ctx context.Context, network, addr string) (net.Conn, error) {
+	conn, err := meek.underlyingDialer(ctx, network, addr)
+	if err == nil {
+		meek.mutex.Lock()
+		if meek.firstUnderlyingConn == nil {
+			// Keep a reference to the first underlying conn to be used as a
+			// common.MetricsSource in GetMetrics. This enables capturing
+			// metrics such as fragmentor configuration.
+			meek.firstUnderlyingConn = conn
+		}
+		meek.mutex.Unlock()
+	}
+	// Note: no trace error to preserve error type
+	return conn, err
+}
+
 type cachedTLSDialer struct {
 	usedCachedConn int32
 	cachedConn     net.Conn
@@ -803,6 +834,29 @@ func (meek *MeekConn) GetMetrics() common.LogFields {
 		logFields["meek_tls_padding"] = meek.tlsPadding
 		logFields["meek_limit_request"] = meek.limitRequestPayloadLength
 	}
+	// Include metrics, such as fragmentor metrics, from the _first_ underlying
+	// dial conn. Properties of subsequent underlying dial conns are not reflected
+	// in these metrics; we assume that the first dial conn, which most likely
+	// transits the various protocol handshakes, is most significant.
+	meek.mutex.Lock()
+	underlyingMetrics, ok := meek.firstUnderlyingConn.(common.MetricsSource)
+	if ok {
+		logFields.Add(underlyingMetrics.GetMetrics())
+	}
+	meek.mutex.Unlock()
+	return logFields
+}
+
+// GetNoticeMetrics implements the common.NoticeMetricsSource interface.
+func (meek *MeekConn) GetNoticeMetrics() common.LogFields {
+
+	// These fields are logged only in notices, for diagnostics. The server
+	// will log the same values, but derives them from HTTP headers, so they
+	// don't need to be sent in the API request.
+
+	logFields := make(common.LogFields)
+	logFields["meek_cookie_name"] = meek.cookie.Name
+	logFields["meek_content_type"] = meek.contentType
 	return logFields
 }
 
@@ -823,7 +877,7 @@ func (meek *MeekConn) ObfuscatedRoundTrip(
 		return nil, errors.TraceNew("operation unsupported")
 	}
 
-	cookie, _, _, _, err := makeMeekObfuscationValues(
+	cookie, contentType, _, _, _, err := makeMeekObfuscationValues(
 		meek.getCustomParameters(),
 		meek.meekCookieEncryptionPublicKey,
 		meek.meekObfuscatedKey,
@@ -843,7 +897,7 @@ func (meek *MeekConn) ObfuscatedRoundTrip(
 	// the concurrency constraints are satisfied.
 
 	request, err := meek.newRequest(
-		requestCtx, cookie, bytes.NewReader(requestBody), 0)
+		requestCtx, cookie, contentType, bytes.NewReader(requestBody), 0)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
@@ -1178,6 +1232,7 @@ func (r *readCloseSignaller) AwaitClosed() bool {
 func (meek *MeekConn) newRequest(
 	requestCtx context.Context,
 	cookie *http.Cookie,
+	contentType string,
 	body io.Reader,
 	contentLength int) (*http.Request, error) {
 
@@ -1199,7 +1254,7 @@ func (meek *MeekConn) newRequest(
 
 	meek.addAdditionalHeaders(request)
 
-	request.Header.Set("Content-Type", "application/octet-stream")
+	request.Header.Set("Content-Type", contentType)
 
 	if cookie == nil {
 		cookie = meek.cookie
@@ -1320,6 +1375,7 @@ func (meek *MeekConn) relayRoundTrip(sendBuffer *bytes.Buffer) (int64, error) {
 		request, err := meek.newRequest(
 			requestCtx,
 			nil,
+			meek.contentType,
 			requestBody,
 			contentLength)
 		if err != nil {
@@ -1535,13 +1591,14 @@ func makeMeekObfuscationValues(
 	endPoint string,
 
 ) (cookie *http.Cookie,
+	contentType string,
 	tlsPadding int,
 	limitRequestPayloadLength int,
 	redialTLSProbability float64,
 	err error) {
 
 	if meekCookieEncryptionPublicKey == "" {
-		return nil, 0, 0, 0.0, errors.TraceNew("missing public key")
+		return nil, "", 0, 0, 0.0, errors.TraceNew("missing public key")
 	}
 
 	cookieData := &protocol.MeekCookieData{
@@ -1551,7 +1608,7 @@ func makeMeekObfuscationValues(
 	}
 	serializedCookie, err := json.Marshal(cookieData)
 	if err != nil {
-		return nil, 0, 0, 0.0, errors.Trace(err)
+		return nil, "", 0, 0, 0.0, errors.Trace(err)
 	}
 
 	// Encrypt the JSON data
@@ -1565,12 +1622,12 @@ func makeMeekObfuscationValues(
 	var publicKey [32]byte
 	decodedPublicKey, err := base64.StdEncoding.DecodeString(meekCookieEncryptionPublicKey)
 	if err != nil {
-		return nil, 0, 0, 0.0, errors.Trace(err)
+		return nil, "", 0, 0, 0.0, errors.Trace(err)
 	}
 	copy(publicKey[:], decodedPublicKey)
 	ephemeralPublicKey, ephemeralPrivateKey, err := box.GenerateKey(rand.Reader)
 	if err != nil {
-		return nil, 0, 0, 0.0, errors.Trace(err)
+		return nil, "", 0, 0, 0.0, errors.Trace(err)
 	}
 	box := box.Seal(nil, serializedCookie, &nonce, &publicKey, ephemeralPrivateKey)
 	encryptedCookie := make([]byte, 32+len(box))
@@ -1587,7 +1644,7 @@ func makeMeekObfuscationValues(
 			PaddingPRNGSeed: meekObfuscatorPaddingPRNGSeed,
 			MaxPadding:      &maxPadding})
 	if err != nil {
-		return nil, 0, 0, 0.0, errors.Trace(err)
+		return nil, "", 0, 0, 0.0, errors.Trace(err)
 	}
 	obfuscatedCookie := obfuscator.SendSeedMessage()
 	seedLen := len(obfuscatedCookie)
@@ -1596,19 +1653,34 @@ func makeMeekObfuscationValues(
 
 	cookieNamePRNG, err := obfuscator.GetDerivedPRNG("meek-cookie-name")
 	if err != nil {
-		return nil, 0, 0, 0.0, errors.Trace(err)
+		return nil, "", 0, 0, 0.0, errors.Trace(err)
+	}
+	var cookieName string
+	if cookieNamePRNG.FlipWeightedCoin(p.Float(parameters.MeekAlternateCookieNameProbability)) {
+		cookieName = values.GetCookieName(cookieNamePRNG)
+	} else {
+		// Format the HTTP cookie
+		// The format is <random letter 'A'-'Z'>=<base64 data>, which is intended to match common cookie formats.
+		A := int('A')
+		Z := int('Z')
+		// letterIndex is integer in range [int('A'), int('Z')]
+		letterIndex := cookieNamePRNG.Intn(Z - A + 1)
+		cookieName = string(byte(A + letterIndex))
 	}
 
-	// Format the HTTP cookie
-	// The format is <random letter 'A'-'Z'>=<base64 data>, which is intended to match common cookie formats.
-	A := int('A')
-	Z := int('Z')
-	// letterIndex is integer in range [int('A'), int('Z')]
-	letterIndex := cookieNamePRNG.Intn(Z - A + 1)
-
 	cookie = &http.Cookie{
-		Name:  string(byte(A + letterIndex)),
+		Name:  cookieName,
 		Value: base64.StdEncoding.EncodeToString(obfuscatedCookie)}
+
+	contentTypePRNG, err := obfuscator.GetDerivedPRNG("meek-content-type")
+	if err != nil {
+		return nil, "", 0, 0, 0.0, errors.Trace(err)
+	}
+	if contentTypePRNG.FlipWeightedCoin(p.Float(parameters.MeekAlternateContentTypeProbability)) {
+		contentType = values.GetContentType(contentTypePRNG)
+	} else {
+		contentType = "application/octet-stream"
+	}
 
 	tlsPadding = 0
 	limitRequestPayloadLength = MEEK_MAX_REQUEST_PAYLOAD_LENGTH
@@ -1622,7 +1694,7 @@ func makeMeekObfuscationValues(
 		limitRequestPayloadLengthPRNG, err := obfuscator.GetDerivedPRNG(
 			"meek-limit-request-payload-length")
 		if err != nil {
-			return nil, 0, 0, 0.0, errors.Trace(err)
+			return nil, "", 0, 0, 0.0, errors.Trace(err)
 		}
 
 		minLength := p.Int(parameters.MeekMinLimitRequestPayloadLength)
@@ -1649,7 +1721,7 @@ func makeMeekObfuscationValues(
 			tlsPaddingPRNG, err := obfuscator.GetDerivedPRNG(
 				"meek-tls-padding")
 			if err != nil {
-				return nil, 0, 0, 0.0, errors.Trace(err)
+				return nil, "", 0, 0, 0.0, errors.Trace(err)
 			}
 
 			tlsPadding = tlsPaddingPRNG.Range(minPadding, maxPadding)
@@ -1658,5 +1730,5 @@ func makeMeekObfuscationValues(
 		redialTLSProbability = p.Float(parameters.MeekRedialTLSProbability)
 	}
 
-	return cookie, tlsPadding, limitRequestPayloadLength, redialTLSProbability, nil
+	return cookie, contentType, tlsPadding, limitRequestPayloadLength, redialTLSProbability, nil
 }

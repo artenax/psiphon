@@ -136,7 +136,6 @@ func getCustomParameters(
 // handshake requests and starting operateTunnel from tunnels which
 // may be discarded, call Activate on connected tunnels sequentially
 // as necessary.
-//
 func ConnectTunnel(
 	ctx context.Context,
 	config *Config,
@@ -182,15 +181,17 @@ func (tunnel *Tunnel) Activate(
 	defer func() {
 		if !activationSucceeded && baseCtx.Err() != context.Canceled {
 			tunnel.dialParams.Failed(tunnel.config)
-			_ = RecordFailedTunnelStat(
-				tunnel.config,
-				tunnel.dialParams,
-				tunnel.livenessTestMetrics,
-				-1,
-				-1,
-				retErr)
 			if tunnel.extraFailureAction != nil {
 				tunnel.extraFailureAction()
+			}
+			if retErr != nil {
+				_ = RecordFailedTunnelStat(
+					tunnel.config,
+					tunnel.dialParams,
+					tunnel.livenessTestMetrics,
+					-1,
+					-1,
+					retErr)
 			}
 		}
 	}()
@@ -704,15 +705,17 @@ func dialTunnel(
 	defer func() {
 		if !dialSucceeded && baseCtx.Err() != context.Canceled {
 			dialParams.Failed(config)
-			_ = RecordFailedTunnelStat(
-				config,
-				dialParams,
-				failedTunnelLivenessTestMetrics,
-				-1,
-				-1,
-				retErr)
 			if extraFailureAction != nil {
 				extraFailureAction()
+			}
+			if retErr != nil {
+				_ = RecordFailedTunnelStat(
+					config,
+					dialParams,
+					failedTunnelLivenessTestMetrics,
+					-1,
+					-1,
+					retErr)
 			}
 		}
 	}()
@@ -938,11 +941,12 @@ func dialTunnel(
 
 	// Some conns report additional metrics. fragmentor.Conns report
 	// fragmentor configs.
-	//
-	// Limitation: for meek, GetMetrics from underlying fragmentor.Conn(s)
-	// should be called in order to log fragmentor metrics for meek sessions.
 	if metricsSource, ok := dialConn.(common.MetricsSource); ok {
 		dialParams.DialConnMetrics = metricsSource
+	}
+
+	if noticeMetricsSource, ok := dialConn.(common.NoticeMetricsSource); ok {
+		dialParams.DialConnNoticeMetrics = noticeMetricsSource
 	}
 
 	// If dialConn is not a Closer, tunnel failure detection may be slower
@@ -1351,7 +1355,6 @@ func performLivenessTest(
 //
 // TODO: change "recently active" to include having received any
 // SSH protocol messages from the server, not just user payload?
-//
 func (tunnel *Tunnel) operateTunnel(tunnelOwner TunnelOwner) {
 	defer tunnel.operateWaitGroup.Done()
 

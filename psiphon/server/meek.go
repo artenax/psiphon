@@ -674,6 +674,9 @@ func (server *MeekServer) getSessionOrEndpoint(
 				IPs := strings.Split(value, ",")
 				IP := IPs[len(IPs)-1]
 
+				// Remove optional whitespace surrounding the commas.
+				IP = strings.TrimSpace(IP)
+
 				if net.ParseIP(IP) != nil {
 					clientIP = IP
 					break
@@ -790,6 +793,8 @@ func (server *MeekServer) getSessionOrEndpoint(
 		meekProtocolVersion: clientSessionData.MeekProtocolVersion,
 		sessionIDSent:       false,
 		cachedResponse:      cachedResponse,
+		cookieName:          meekCookie.Name,
+		contentType:         request.Header.Get("Content-Type"),
 	}
 
 	session.touch()
@@ -1278,6 +1283,8 @@ type meekSession struct {
 	meekProtocolVersion              int
 	sessionIDSent                    bool
 	cachedResponse                   *CachedResponse
+	cookieName                       string
+	contentType                      string
 }
 
 func (session *meekSession) touch() {
@@ -1346,6 +1353,8 @@ func (session *meekSession) GetMetrics() common.LogFields {
 	logFields["meek_peak_cached_response_hit_size"] = atomic.LoadInt64(&session.metricPeakCachedResponseHitSize)
 	logFields["meek_cached_response_miss_position"] = atomic.LoadInt64(&session.metricCachedResponseMissPosition)
 	logFields["meek_underlying_connection_count"] = atomic.LoadInt64(&session.metricUnderlyingConnCount)
+	logFields["meek_cookie_name"] = session.cookieName
+	logFields["meek_content_type"] = session.contentType
 	return logFields
 }
 

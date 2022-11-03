@@ -18,7 +18,6 @@
  */
 
 /*
-
 Package prng implements a seeded, unbiased PRNG that is suitable for use
 cases including obfuscation, network jitter, load balancing.
 
@@ -42,7 +41,6 @@ required for replay.
 
 PRNG conforms to io.Reader and math/rand.Source, with additional helper
 functions.
-
 */
 package prng
 
@@ -266,7 +264,7 @@ func (p *PRNG) ExpFloat64Range(min, max, lambda float64) float64 {
 	return value
 }
 
-// Intn is equivilent to math/rand.Perm.
+// Perm is equivilent to math/rand.Perm.
 func (p *PRNG) Perm(n int) []int {
 	return p.rand.Perm(n)
 }
@@ -333,6 +331,10 @@ func (p *PRNG) Base64String(byteLength int) string {
 }
 
 var p *PRNG
+
+func DefaultPRNG() *PRNG {
+	return p
+}
 
 func Read(b []byte) (int, error) {
 	return p.Read(b)

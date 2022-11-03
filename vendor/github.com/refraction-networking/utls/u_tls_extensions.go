@@ -49,29 +49,43 @@ type SNIExtension struct {
 
 func (e *SNIExtension) writeToUConn(uc *UConn) error {
 	uc.config.ServerName = e.ServerName
-	uc.HandshakeState.Hello.ServerName = e.ServerName
+	hostName := hostnameInSNI(e.ServerName)
+	uc.HandshakeState.Hello.ServerName = hostName
+
 	return nil
 }
 
 func (e *SNIExtension) Len() int {
-	return 4 + 2 + 1 + 2 + len(e.ServerName)
+	// Literal IP addresses, absolute FQDNs, and empty strings are not permitted as SNI values.
+	// See RFC 6066, Section 3.
+	hostName := hostnameInSNI(e.ServerName)
+	if len(hostName) == 0 {
+		return 0
+	}
+	return 4 + 2 + 1 + 2 + len(hostName)
 }
 
 func (e *SNIExtension) Read(b []byte) (int, error) {
+	// Literal IP addresses, absolute FQDNs, and empty strings are not permitted as SNI values.
+	// See RFC 6066, Section 3.
+	hostName := hostnameInSNI(e.ServerName)
+	if len(hostName) == 0 {
+		return 0, io.EOF
+	}
 	if len(b) < e.Len() {
 		return 0, io.ErrShortBuffer
 	}
 	// RFC 3546, section 3.1
 	b[0] = byte(extensionServerName >> 8)
 	b[1] = byte(extensionServerName)
-	b[2] = byte((len(e.ServerName) + 5) >> 8)
-	b[3] = byte((len(e.ServerName) + 5))
-	b[4] = byte((len(e.ServerName) + 3) >> 8)
-	b[5] = byte(len(e.ServerName) + 3)
+	b[2] = byte((len(hostName) + 5) >> 8)
+	b[3] = byte(len(hostName) + 5)
+	b[4] = byte((len(hostName) + 3) >> 8)
+	b[5] = byte(len(hostName) + 3)
 	// b[6] Server Name Type: host_name (0)
-	b[7] = byte(len(e.ServerName) >> 8)
-	b[8] = byte(len(e.ServerName))
-	copy(b[9:], []byte(e.ServerName))
+	b[7] = byte(len(hostName) >> 8)
+	b[8] = byte(len(hostName))
+	copy(b[9:], []byte(hostName))
 	return e.Len(), io.EOF
 }
 
@@ -101,6 +115,36 @@ func (e *StatusRequestExtension) Read(b []byte) (int, error) {
 	return e.Len(), io.EOF
 }
 
+type StatusRequestV2Extension struct {
+}
+
+func (e *StatusRequestV2Extension) writeToUConn(uc *UConn) error {
+	uc.HandshakeState.Hello.OcspStapling = true
+	return nil
+}
+
+func (e *StatusRequestV2Extension) Len() int {
+	return 13
+}
+
+func (e *StatusRequestV2Extension) Read(b []byte) (int, error) {
+	if len(b) < e.Len() {
+		return 0, io.ErrShortBuffer
+	}
+	// RFC 4366, section 3.6
+	b[0] = byte(17 >> 8)
+	b[1] = byte(17)
+	b[2] = 0
+	b[3] = 9
+	b[4] = 0
+	b[5] = 7
+	b[6] = 2 // OCSP type
+	b[7] = 0
+	b[8] = 4
+	// Two zero valued uint16s for the two lengths.
+	return e.Len(), io.EOF
+}
+
 type SupportedCurvesExtension struct {
 	Curves []CurveID
 }
@@ -123,9 +167,9 @@ func (e *SupportedCurvesExtension) Read(b []byte) (int, error) {
 	b[0] = byte(extensionSupportedCurves >> 8)
 	b[1] = byte(extensionSupportedCurves)
 	b[2] = byte((2 + 2*len(e.Curves)) >> 8)
-	b[3] = byte((2 + 2*len(e.Curves)))
+	b[3] = byte(2 + 2*len(e.Curves))
 	b[4] = byte((2 * len(e.Curves)) >> 8)
-	b[5] = byte((2 * len(e.Curves)))
+	b[5] = byte(2 * len(e.Curves))
 	for i, curve := range e.Curves {
 		b[6+2*i] = byte(curve >> 8)
 		b[7+2*i] = byte(curve)
@@ -154,8 +198,8 @@ func (e *SupportedPointsExtension) Read(b []byte) (int, error) {
 	b[0] = byte(extensionSupportedPoints >> 8)
 	b[1] = byte(extensionSupportedPoints)
 	b[2] = byte((1 + len(e.SupportedPoints)) >> 8)
-	b[3] = byte((1 + len(e.SupportedPoints)))
-	b[4] = byte((len(e.SupportedPoints)))
+	b[3] = byte(1 + len(e.SupportedPoints))
+	b[4] = byte(len(e.SupportedPoints))
 	for i, pointFormat := range e.SupportedPoints {
 		b[5+i] = pointFormat
 	}
@@ -183,9 +227,40 @@ func (e *SignatureAlgorithmsExtension) Read(b []byte) (int, error) {
 	b[0] = byte(extensionSignatureAlgorithms >> 8)
 	b[1] = byte(extensionSignatureAlgorithms)
 	b[2] = byte((2 + 2*len(e.SupportedSignatureAlgorithms)) >> 8)
-	b[3] = byte((2 + 2*len(e.SupportedSignatureAlgorithms)))
+	b[3] = byte(2 + 2*len(e.SupportedSignatureAlgorithms))
 	b[4] = byte((2 * len(e.SupportedSignatureAlgorithms)) >> 8)
-	b[5] = byte((2 * len(e.SupportedSignatureAlgorithms)))
+	b[5] = byte(2 * len(e.SupportedSignatureAlgorithms))
+	for i, sigAndHash := range e.SupportedSignatureAlgorithms {
+		b[6+2*i] = byte(sigAndHash >> 8)
+		b[7+2*i] = byte(sigAndHash)
+	}
+	return e.Len(), io.EOF
+}
+
+type SignatureAlgorithmsCertExtension struct {
+	SupportedSignatureAlgorithms []SignatureScheme
+}
+
+func (e *SignatureAlgorithmsCertExtension) writeToUConn(uc *UConn) error {
+	uc.HandshakeState.Hello.SupportedSignatureAlgorithms = e.SupportedSignatureAlgorithms
+	return nil
+}
+
+func (e *SignatureAlgorithmsCertExtension) Len() int {
+	return 6 + 2*len(e.SupportedSignatureAlgorithms)
+}
+
+func (e *SignatureAlgorithmsCertExtension) Read(b []byte) (int, error) {
+	if len(b) < e.Len() {
+		return 0, io.ErrShortBuffer
+	}
+	// https://tools.ietf.org/html/rfc5246#section-7.4.1.4.1
+	b[0] = byte(extensionSignatureAlgorithmsCert >> 8)
+	b[1] = byte(extensionSignatureAlgorithmsCert)
+	b[2] = byte((2 + 2*len(e.SupportedSignatureAlgorithms)) >> 8)
+	b[3] = byte(2 + 2*len(e.SupportedSignatureAlgorithms))
+	b[4] = byte((2 * len(e.SupportedSignatureAlgorithms)) >> 8)
+	b[5] = byte(2 * len(e.SupportedSignatureAlgorithms))
 	for i, sigAndHash := range e.SupportedSignatureAlgorithms {
 		b[6+2*i] = byte(sigAndHash >> 8)
 		b[7+2*i] = byte(sigAndHash)
@@ -277,6 +352,63 @@ func (e *ALPNExtension) Read(b []byte) (int, error) {
 	stringsLength += 2
 	lengths[0] = byte(stringsLength >> 8)
 	lengths[1] = byte(stringsLength)
+
+	return e.Len(), io.EOF
+}
+
+// ApplicationSettingsExtension represents the TLS ALPS extension. At the time
+// of this writing, this extension is currently a draft:
+// https://datatracker.ietf.org/doc/html/draft-vvv-tls-alps-01
+//
+// This library does not offer actual support for ALPS. This extension is
+// "faked" - it is advertised by the client, but not respected if the server
+// responds with support.
+//
+// In the normal convention of this library, this type name would be prefixed
+// with 'Fake'. The existing name is retained for backwards compatibility
+// reasons.
+type ApplicationSettingsExtension struct {
+	SupportedProtocols []string
+}
+
+func (e *ApplicationSettingsExtension) writeToUConn(uc *UConn) error {
+	return nil
+}
+
+func (e *ApplicationSettingsExtension) Len() int {
+	bLen := 2 + 2 + 2 // Type + Length + ALPS Extension length
+	for _, s := range e.SupportedProtocols {
+		bLen += 1 + len(s) // Supported ALPN Length + actual length of protocol
+	}
+	return bLen
+}
+
+func (e *ApplicationSettingsExtension) Read(b []byte) (int, error) {
+	if len(b) < e.Len() {
+		return 0, io.ErrShortBuffer
+	}
+
+	// Read Type.
+	b[0] = byte(fakeExtensionALPS >> 8)   // hex: 44 dec: 68
+	b[1] = byte(fakeExtensionALPS & 0xff) // hex: 69 dec: 105
+
+	lengths := b[2:] // get the remaining buffer without Type
+	b = b[6:]        // set the buffer to the buffer without Type, Length and ALPS Extension Length (so only the Supported ALPN list remains)
+
+	stringsLength := 0
+	for _, s := range e.SupportedProtocols {
+		l := len(s)            // Supported ALPN Length
+		b[0] = byte(l)         // Supported ALPN Length in bytes hex: 02 dec: 2
+		copy(b[1:], s)         // copy the Supported ALPN as bytes to the buffer
+		b = b[1+l:]            // set the buffer to the buffer without the Supported ALPN Length and Supported ALPN (so we can continue to the next protocol in this loop)
+		stringsLength += 1 + l // Supported ALPN Length (the field itself) + Supported ALPN Length (the value)
+	}
+
+	lengths[2] = byte(stringsLength >> 8) // ALPS Extension Length hex: 00 dec: 0
+	lengths[3] = byte(stringsLength)      // ALPS Extension Length hex: 03 dec: 3
+	stringsLength += 2                    // plus ALPS Extension Length field length
+	lengths[0] = byte(stringsLength >> 8) // Length hex:00 dec: 0
+	lengths[1] = byte(stringsLength)      // Length hex: 05 dec: 5
 
 	return e.Len(), io.EOF
 }
@@ -499,6 +631,51 @@ func (e *UtlsPaddingExtension) Read(b []byte) (int, error) {
 	return e.Len(), io.EOF
 }
 
+// UtlsCompressCertExtension is only implemented client-side, for server certificates. Alternate
+// certificate message formats (https://datatracker.ietf.org/doc/html/rfc7250) are not supported.
+//
+// See https://datatracker.ietf.org/doc/html/rfc8879#section-3
+type UtlsCompressCertExtension struct {
+	Algorithms []CertCompressionAlgo
+}
+
+func (e *UtlsCompressCertExtension) writeToUConn(uc *UConn) error {
+	uc.certCompressionAlgs = e.Algorithms
+	return nil
+}
+
+func (e *UtlsCompressCertExtension) Len() int {
+	return 4 + 1 + (2 * len(e.Algorithms))
+}
+
+func (e *UtlsCompressCertExtension) Read(b []byte) (int, error) {
+	if len(b) < e.Len() {
+		return 0, io.ErrShortBuffer
+	}
+	b[0] = byte(utlsExtensionCompressCertificate >> 8)
+	b[1] = byte(utlsExtensionCompressCertificate & 0xff)
+
+	extLen := 2 * len(e.Algorithms)
+	if extLen > 255 {
+		return 0, errors.New("too many certificate compression methods")
+	}
+
+	// Extension data length.
+	b[2] = byte((extLen + 1) >> 8)
+	b[3] = byte((extLen + 1) & 0xff)
+
+	// Methods length.
+	b[4] = byte(extLen)
+
+	i := 5
+	for _, compMethod := range e.Algorithms {
+		b[i] = byte(compMethod >> 8)
+		b[i+1] = byte(compMethod)
+		i += 2
+	}
+	return e.Len(), io.EOF
+}
+
 // https://github.com/google/boringssl/blob/7d7554b6b3c79e707e25521e61e066ce2b996e4c/ssl/t1_lib.c#L2803
 func BoringPaddingStyle(unpaddedLen int) (int, bool) {
 	if unpaddedLen > 0xff && unpaddedLen < 0x200 {
@@ -539,9 +716,9 @@ func (e *KeyShareExtension) Read(b []byte) (int, error) {
 	b[1] = byte(extensionKeyShare)
 	keySharesLen := e.keySharesLen()
 	b[2] = byte((keySharesLen + 2) >> 8)
-	b[3] = byte((keySharesLen + 2))
+	b[3] = byte(keySharesLen + 2)
 	b[4] = byte((keySharesLen) >> 8)
-	b[5] = byte((keySharesLen))
+	b[5] = byte(keySharesLen)
 
 	i := 6
 	for _, ks := range e.KeyShares {
@@ -583,7 +760,7 @@ func (e *PSKKeyExchangeModesExtension) Read(b []byte) (int, error) {
 
 	modesLen := len(e.Modes)
 	b[2] = byte((modesLen + 1) >> 8)
-	b[3] = byte((modesLen + 1))
+	b[3] = byte(modesLen + 1)
 	b[4] = byte(modesLen)
 
 	if len(e.Modes) > 0 {
@@ -623,7 +800,7 @@ func (e *SupportedVersionsExtension) Read(b []byte) (int, error) {
 	b[0] = byte(extensionSupportedVersions >> 8)
 	b[1] = byte(extensionSupportedVersions)
 	b[2] = byte((extLen + 1) >> 8)
-	b[3] = byte((extLen + 1))
+	b[3] = byte(extLen + 1)
 	b[4] = byte(extLen)
 
 	i := 5
@@ -668,6 +845,8 @@ FAKE EXTENSIONS
 */
 
 type FakeChannelIDExtension struct {
+	// The extension ID changed from 30031 to 30032. Set to true to use the old extension ID.
+	OldExtensionID bool
 }
 
 func (e *FakeChannelIDExtension) writeToUConn(uc *UConn) error {
@@ -682,48 +861,14 @@ func (e *FakeChannelIDExtension) Read(b []byte) (int, error) {
 	if len(b) < e.Len() {
 		return 0, io.ErrShortBuffer
 	}
+	extensionID := fakeExtensionChannelID
+	if e.OldExtensionID {
+		extensionID = fakeExtensionChannelIDOld
+	}
 	// https://tools.ietf.org/html/draft-balfanz-tls-channelid-00
-	b[0] = byte(fakeExtensionChannelID >> 8)
-	b[1] = byte(fakeExtensionChannelID & 0xff)
+	b[0] = byte(extensionID >> 8)
+	b[1] = byte(extensionID & 0xff)
 	// The length is 0
-	return e.Len(), io.EOF
-}
-
-type FakeCertCompressionAlgsExtension struct {
-	Methods []CertCompressionAlgo
-}
-
-func (e *FakeCertCompressionAlgsExtension) writeToUConn(uc *UConn) error {
-	return nil
-}
-
-func (e *FakeCertCompressionAlgsExtension) Len() int {
-	return 4 + 1 + (2 * len(e.Methods))
-}
-
-func (e *FakeCertCompressionAlgsExtension) Read(b []byte) (int, error) {
-	if len(b) < e.Len() {
-		return 0, io.ErrShortBuffer
-	}
-	// https://tools.ietf.org/html/draft-balfanz-tls-channelid-00
-	b[0] = byte(fakeCertCompressionAlgs >> 8)
-	b[1] = byte(fakeCertCompressionAlgs & 0xff)
-
-	extLen := 2 * len(e.Methods)
-	if extLen > 255 {
-		return 0, errors.New("too many certificate compression methods")
-	}
-
-	b[2] = byte((extLen + 1) >> 8)
-	b[3] = byte((extLen + 1) & 0xff)
-	b[4] = byte(extLen)
-
-	i := 5
-	for _, compMethod := range e.Methods {
-		b[i] = byte(compMethod >> 8)
-		b[i+1] = byte(compMethod)
-		i += 2
-	}
 	return e.Len(), io.EOF
 }
 
@@ -752,5 +897,100 @@ func (e *FakeRecordSizeLimitExtension) Read(b []byte) (int, error) {
 
 	b[4] = byte(e.Limit >> 8)
 	b[5] = byte(e.Limit & 0xff)
+	return e.Len(), io.EOF
+}
+
+type DelegatedCredentialsExtension struct {
+	AlgorithmsSignature []SignatureScheme
+}
+
+func (e *DelegatedCredentialsExtension) writeToUConn(uc *UConn) error {
+	return nil
+}
+
+func (e *DelegatedCredentialsExtension) Len() int {
+	return 6 + 2*len(e.AlgorithmsSignature)
+}
+
+func (e *DelegatedCredentialsExtension) Read(b []byte) (int, error) {
+	if len(b) < e.Len() {
+		return 0, io.ErrShortBuffer
+	}
+	b[0] = byte(extensionDelegatedCredentials >> 8)
+	b[1] = byte(extensionDelegatedCredentials)
+	b[2] = byte((2 + 2*len(e.AlgorithmsSignature)) >> 8)
+	b[3] = byte(2 + 2*len(e.AlgorithmsSignature))
+	b[4] = byte((2 * len(e.AlgorithmsSignature)) >> 8)
+	b[5] = byte(2 * len(e.AlgorithmsSignature))
+	for i, sigAndHash := range e.AlgorithmsSignature {
+		b[6+2*i] = byte(sigAndHash >> 8)
+		b[7+2*i] = byte(sigAndHash)
+	}
+	return e.Len(), io.EOF
+}
+
+// https://tools.ietf.org/html/rfc8472#section-2
+
+type FakeTokenBindingExtension struct {
+	MajorVersion, MinorVersion uint8
+	KeyParameters              []uint8
+}
+
+func (e *FakeTokenBindingExtension) writeToUConn(uc *UConn) error {
+	return nil
+}
+
+func (e *FakeTokenBindingExtension) Len() int {
+	// extension ID + data length + versions + key parameters length + key parameters
+	return 2 + 2 + 2 + 1 + len(e.KeyParameters)
+}
+
+func (e *FakeTokenBindingExtension) Read(b []byte) (int, error) {
+	if len(b) < e.Len() {
+		return 0, io.ErrShortBuffer
+	}
+	dataLen := e.Len() - 4
+	b[0] = byte(fakeExtensionTokenBinding >> 8)
+	b[1] = byte(fakeExtensionTokenBinding & 0xff)
+	b[2] = byte(dataLen >> 8)
+	b[3] = byte(dataLen & 0xff)
+	b[4] = e.MajorVersion
+	b[5] = e.MinorVersion
+	b[6] = byte(len(e.KeyParameters))
+	if len(e.KeyParameters) > 0 {
+		copy(b[7:], e.KeyParameters)
+	}
+	return e.Len(), io.EOF
+}
+
+// https://datatracker.ietf.org/doc/html/draft-ietf-tls-subcerts-15#section-4.1.1
+
+type FakeDelegatedCredentialsExtension struct {
+	SupportedSignatureAlgorithms []SignatureScheme
+}
+
+func (e *FakeDelegatedCredentialsExtension) writeToUConn(uc *UConn) error {
+	return nil
+}
+
+func (e *FakeDelegatedCredentialsExtension) Len() int {
+	return 6 + 2*len(e.SupportedSignatureAlgorithms)
+}
+
+func (e *FakeDelegatedCredentialsExtension) Read(b []byte) (int, error) {
+	if len(b) < e.Len() {
+		return 0, io.ErrShortBuffer
+	}
+	// https://datatracker.ietf.org/doc/html/draft-ietf-tls-subcerts-15#section-4.1.1
+	b[0] = byte(fakeExtensionDelegatedCredentials >> 8)
+	b[1] = byte(fakeExtensionDelegatedCredentials)
+	b[2] = byte((2 + 2*len(e.SupportedSignatureAlgorithms)) >> 8)
+	b[3] = byte((2 + 2*len(e.SupportedSignatureAlgorithms)))
+	b[4] = byte((2 * len(e.SupportedSignatureAlgorithms)) >> 8)
+	b[5] = byte((2 * len(e.SupportedSignatureAlgorithms)))
+	for i, sigAndHash := range e.SupportedSignatureAlgorithms {
+		b[6+2*i] = byte(sigAndHash >> 8)
+		b[7+2*i] = byte(sigAndHash)
+	}
 	return e.Len(), io.EOF
 }

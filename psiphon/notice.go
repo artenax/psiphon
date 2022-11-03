@@ -111,7 +111,6 @@ func GetEmitNetworkParameters() bool {
 // - "timestamp": UTC timezone, RFC3339Milli format timestamp for notice event
 //
 // See the Notice* functions for details on each notice meaning and payload.
-//
 func SetNoticeWriter(writer io.Writer) {
 
 	singletonNoticeLogger.mutex.Lock()
@@ -122,25 +121,24 @@ func SetNoticeWriter(writer io.Writer) {
 
 // setNoticeFiles configures files for notice writing.
 //
-// - When homepageFilename is not "", homepages are written to the specified file
-//   and omitted from the writer. The file may be read after the Tunnels notice
-//   with count of 1. The file should be opened read-only for reading.
+//   - When homepageFilename is not "", homepages are written to the specified file
+//     and omitted from the writer. The file may be read after the Tunnels notice
+//     with count of 1. The file should be opened read-only for reading.
 //
-// - When rotatingFilename is not "", all notices are are written to the specified
-//   file. Diagnostic notices are omitted from the writer. The file is rotated
-//   when its size exceeds rotatingFileSize. One rotated older file,
-//   <rotatingFilename>.1, is retained. The files may be read at any time; and
-//   should be opened read-only for reading. rotatingSyncFrequency specifies how
-//   many notices are written before syncing the file.
-//   If either rotatingFileSize or rotatingSyncFrequency are <= 0, default values
-//   are used.
+//   - When rotatingFilename is not "", all notices are are written to the specified
+//     file. Diagnostic notices are omitted from the writer. The file is rotated
+//     when its size exceeds rotatingFileSize. One rotated older file,
+//     <rotatingFilename>.1, is retained. The files may be read at any time; and
+//     should be opened read-only for reading. rotatingSyncFrequency specifies how
+//     many notices are written before syncing the file.
+//     If either rotatingFileSize or rotatingSyncFrequency are <= 0, default values
+//     are used.
 //
-// - If an error occurs when writing to a file, an InternalError notice is emitted to
-//   the writer.
+//   - If an error occurs when writing to a file, an InternalError notice is emitted to
+//     the writer.
 //
 // setNoticeFiles closes open homepage or rotating files before applying the new
 // configuration.
-//
 func setNoticeFiles(
 	homepageFilename string,
 	rotatingFilename string,
@@ -588,6 +586,13 @@ func noticeWithDialParameters(noticeType string, dialParams *DialParameters, pos
 			}
 		}
 
+		if dialParams.DialConnNoticeMetrics != nil {
+			metrics := dialParams.DialConnNoticeMetrics.GetNoticeMetrics()
+			for name, value := range metrics {
+				args = append(args, name, value)
+			}
+		}
+
 		if dialParams.ObfuscatedSSHConnMetrics != nil {
 			metrics := dialParams.ObfuscatedSSHConnMetrics.GetMetrics()
 			for name, value := range metrics {
@@ -945,13 +950,18 @@ func NoticeFragmentor(diagnosticID string, message string) {
 	}
 }
 
+// NoticeApplicationParameters reports application parameters.
 func NoticeApplicationParameters(keyValues parameters.KeyValues) {
-	for key, value := range keyValues {
-		singletonNoticeLogger.outputNotice(
-			"ApplicationParameter", 0,
-			"key", key,
-			"value", value)
+
+	// Never emit 'null' instead of empty object
+	if keyValues == nil {
+		keyValues = parameters.KeyValues{}
 	}
+
+	outputRepetitiveNotice(
+		"ApplicationParameters", fmt.Sprintf("%+v", keyValues), 0,
+		"ApplicationParameters", 0,
+		"parameters", keyValues)
 }
 
 // NoticeServerAlert reports server alerts. Each distinct server alert is
@@ -1000,7 +1010,7 @@ func NoticeHoldOffTunnel(diagnosticID string, duration time.Duration) {
 // session.
 func NoticeSkipServerEntry(format string, args ...interface{}) {
 	reason := fmt.Sprintf(format, args...)
-	repetitionKey := fmt.Sprintf("ServerAlert-%+v", reason)
+	repetitionKey := fmt.Sprintf("SkipServerEntryReason-%+v", reason)
 	outputRepetitiveNotice(
 		repetitionKey, "", 0,
 		"SkipServerEntry", 0, "reason", reason)
