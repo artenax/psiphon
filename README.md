@@ -14,8 +14,8 @@ To close the terminal, press Ctrl+C and then y.
 Updated official builds:  
 [Windows 7+ x86](https://github.com/Psiphon-Labs/psiphon-tunnel-core-binaries/blob/master/windows/psiphon-tunnel-core-i686.exe)  
 [Linux x64](https://github.com/Psiphon-Labs/psiphon-tunnel-core-binaries/blob/master/linux/psiphon-tunnel-core-x86_64)  
-With them you can use the psiphon.config from my [Linux x86](https://github.com/artenax/psiphon/releases/tag/linux32) build.  
+With them you can use the psiphon.config from my [Linux x86](https://github.com/artenax/psiphon/releases) build.  
 
 Unofficial builds:  
 [Windows XP](https://github.com/artenax/psiphon/releases/tag/xp)  
-[Linux x86](https://github.com/artenax/psiphon/releases/tag/linux32)  
+[Linux x86](https://github.com/artenax/psiphon/releases)  
