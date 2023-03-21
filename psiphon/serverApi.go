@@ -1109,6 +1109,12 @@ func getBaseAPIParameters(
 			}
 		}
 
+		if dialParams.HTTPTransformerParameters != nil {
+			if dialParams.HTTPTransformerParameters.ProtocolTransformSpec != nil {
+				params["http_transform"] = dialParams.HTTPTransformerParameters.ProtocolTransformName
+			}
+		}
+
 		if dialParams.DialConnMetrics != nil {
 			metrics := dialParams.DialConnMetrics.GetMetrics()
 			for name, value := range metrics {

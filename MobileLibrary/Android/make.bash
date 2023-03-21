@@ -17,7 +17,7 @@ export GOCACHE=/tmp
 
 BUILDINFOFILE="psiphon-tunnel-core_buildinfo.txt"
 BUILDDATE=$(date --iso-8601=seconds)
-BUILDREPO=$(git config --get remote.origin.url)
+BUILDREPO="https://github.com/Psiphon-Labs/psiphon-tunnel-core.git"
 BUILDREV=$(git rev-parse --short HEAD)
 GOVERSION=$(go version | perl -ne '/go version (.*?) / && print $1')
 

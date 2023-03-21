@@ -177,7 +177,6 @@ type Config struct {
 	// "UNFRONTED-MEEK-HTTPS-OSSH", "UNFRONTED-MEEK-SESSION-TICKET-OSSH",
 	// "FRONTED-MEEK-OSSH", "FRONTED-MEEK-HTTP-OSSH", "QUIC-OSSH",
 	// "FRONTED-MEEK-QUIC-OSSH", "TAPDANCE-OSSH", and "CONJURE-OSSH".
-
 	// For the default, an empty list, all protocols are used.
 	LimitTunnelProtocols []string
 
@@ -487,6 +486,18 @@ type Config struct {
 	// duped in NewController. When PacketTunnelTunDeviceFileDescriptor is
 	// set, TunnelPoolSize must be 1.
 	PacketTunnelTunFileDescriptor int
+
+	// PacketTunnelTransparentDNSIPv4Address is the IPv4 address of the DNS
+	// server configured by a VPN using a packet tunnel. All DNS packets
+	// destined to this DNS server are transparently redirected to the
+	// Psiphon server DNS.
+	PacketTunnelTransparentDNSIPv4Address string
+
+	// PacketTunnelTransparentDNSIPv6Address is the IPv6 address of the DNS
+	// server configured by a VPN using a packet tunnel. All DNS packets
+	// destined to this DNS server are transparently redirected to the
+	// Psiphon server DNS.
+	PacketTunnelTransparentDNSIPv6Address string
 
 	// SessionID specifies a client session ID to use in the Psiphon API. The
 	// session ID should be a randomly generated value that is used only for a
@@ -812,6 +823,13 @@ type Config struct {
 	DNSResolverIncludeEDNS0Probability               *float64
 	DNSResolverCacheExtensionInitialTTLMilliseconds  *int
 	DNSResolverCacheExtensionVerifiedTTLMilliseconds *int
+
+	DirectHTTPProtocolTransformSpecs            transforms.Specs
+	DirectHTTPProtocolTransformScopedSpecNames  transforms.ScopedSpecNames
+	DirectHTTPProtocolTransformProbability      *float64
+	FrontedHTTPProtocolTransformSpecs           transforms.Specs
+	FrontedHTTPProtocolTransformScopedSpecNames transforms.ScopedSpecNames
+	FrontedHTTPProtocolTransformProbability     *float64
 
 	// params is the active parameters.Parameters with defaults, config values,
 	// and, optionally, tactics applied.
@@ -1895,6 +1913,30 @@ func (config *Config) makeConfigParameters() map[string]interface{} {
 		applyParameters[parameters.DNSResolverCacheExtensionVerifiedTTL] = fmt.Sprintf("%dms", *config.DNSResolverCacheExtensionVerifiedTTLMilliseconds)
 	}
 
+	if config.DirectHTTPProtocolTransformSpecs != nil {
+		applyParameters[parameters.DirectHTTPProtocolTransformSpecs] = config.DirectHTTPProtocolTransformSpecs
+	}
+
+	if config.DirectHTTPProtocolTransformScopedSpecNames != nil {
+		applyParameters[parameters.DirectHTTPProtocolTransformScopedSpecNames] = config.DirectHTTPProtocolTransformScopedSpecNames
+	}
+
+	if config.DirectHTTPProtocolTransformProbability != nil {
+		applyParameters[parameters.DirectHTTPProtocolTransformProbability] = *config.DirectHTTPProtocolTransformProbability
+	}
+
+	if config.FrontedHTTPProtocolTransformSpecs != nil {
+		applyParameters[parameters.FrontedHTTPProtocolTransformSpecs] = config.FrontedHTTPProtocolTransformSpecs
+	}
+
+	if config.FrontedHTTPProtocolTransformScopedSpecNames != nil {
+		applyParameters[parameters.FrontedHTTPProtocolTransformScopedSpecNames] = config.FrontedHTTPProtocolTransformScopedSpecNames
+	}
+
+	if config.FrontedHTTPProtocolTransformProbability != nil {
+		applyParameters[parameters.FrontedHTTPProtocolTransformProbability] = *config.FrontedHTTPProtocolTransformProbability
+	}
+
 	// When adding new config dial parameters that may override tactics, also
 	// update setDialParametersHash.
 
@@ -2301,6 +2343,44 @@ func (config *Config) setDialParametersHash() {
 	if config.DNSResolverCacheExtensionVerifiedTTLMilliseconds != nil {
 		hash.Write([]byte("DNSResolverCacheExtensionVerifiedTTLMilliseconds"))
 		binary.Write(hash, binary.LittleEndian, int64(*config.DNSResolverCacheExtensionVerifiedTTLMilliseconds))
+	}
+
+	if config.DirectHTTPProtocolTransformSpecs != nil {
+		hash.Write([]byte("DirectHTTPProtocolTransformSpecs"))
+		encodedDirectHTTPProtocolTransformSpecs, _ :=
+			json.Marshal(config.DirectHTTPProtocolTransformSpecs)
+		hash.Write(encodedDirectHTTPProtocolTransformSpecs)
+	}
+
+	if config.DirectHTTPProtocolTransformScopedSpecNames != nil {
+		hash.Write([]byte(""))
+		encodedDirectHTTPProtocolTransformScopedSpecNames, _ :=
+			json.Marshal(config.DirectHTTPProtocolTransformScopedSpecNames)
+		hash.Write(encodedDirectHTTPProtocolTransformScopedSpecNames)
+	}
+
+	if config.DirectHTTPProtocolTransformProbability != nil {
+		hash.Write([]byte("DirectHTTPProtocolTransformProbability"))
+		binary.Write(hash, binary.LittleEndian, *config.DirectHTTPProtocolTransformProbability)
+	}
+
+	if config.FrontedHTTPProtocolTransformSpecs != nil {
+		hash.Write([]byte("FrontedHTTPProtocolTransformSpecs"))
+		encodedFrontedHTTPProtocolTransformSpecs, _ :=
+			json.Marshal(config.FrontedHTTPProtocolTransformSpecs)
+		hash.Write(encodedFrontedHTTPProtocolTransformSpecs)
+	}
+
+	if config.FrontedHTTPProtocolTransformScopedSpecNames != nil {
+		hash.Write([]byte(""))
+		encodedFrontedHTTPProtocolTransformScopedSpecNames, _ :=
+			json.Marshal(config.FrontedHTTPProtocolTransformScopedSpecNames)
+		hash.Write(encodedFrontedHTTPProtocolTransformScopedSpecNames)
+	}
+
+	if config.FrontedHTTPProtocolTransformProbability != nil {
+		hash.Write([]byte("FrontedHTTPProtocolTransformProbability"))
+		binary.Write(hash, binary.LittleEndian, *config.FrontedHTTPProtocolTransformProbability)
 	}
 
 	config.dialParametersHash = hash.Sum(nil)

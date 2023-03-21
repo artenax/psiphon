@@ -66,6 +66,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
@@ -209,7 +210,7 @@ public class PsiphonTunnel {
                     mHostService.onDiagnosticMessage("reconnect error: " + e);
                 }
             }
-        }, mActiveNetworkType, mActiveNetworkDNSServers, mHostService);
+        });
     }
 
     public Object clone() throws CloneNotSupportedException {
@@ -339,22 +340,8 @@ public class PsiphonTunnel {
     // - Only a single instance of PsiphonTunnelFeedback should be used at a time. Using multiple
     // instances in parallel, or concurrently, will result in undefined behavior.
     public static class PsiphonTunnelFeedback {
-
-        final private ExecutorService workQueue;
-        final private ExecutorService callbackQueue;
-
-        public PsiphonTunnelFeedback() {
-            workQueue = Executors.newSingleThreadExecutor();
-            callbackQueue = Executors.newSingleThreadExecutor();
-        }
-
-        @Override
-        protected void finalize() throws Throwable {
-            // Ensure the queues are cleaned up.
-            shutdownAndAwaitTermination(callbackQueue);
-            shutdownAndAwaitTermination(workQueue);
-            super.finalize();
-        }
+        private final ExecutorService workQueue = Executors.newSingleThreadExecutor();
+        private final ExecutorService callbackQueue = Executors.newSingleThreadExecutor();
 
         void shutdownAndAwaitTermination(ExecutorService pool) {
             try {
@@ -398,8 +385,7 @@ public class PsiphonTunnel {
         public void startSendFeedback(Context context, HostFeedbackHandler feedbackHandler, HostLogger logger,
                                       String feedbackConfigJson, String diagnosticsJson, String uploadPath,
                                       String clientPlatformPrefix, String clientPlatformSuffix) {
-
-            workQueue.submit(new Runnable() {
+            workQueue.execute(new Runnable() {
                 @Override
                 public void run() {
                     try {
@@ -411,12 +397,15 @@ public class PsiphonTunnel {
                                 new PsiphonProviderFeedbackHandler() {
                                     @Override
                                     public void sendFeedbackCompleted(java.lang.Exception e) {
-                                        callbackQueue.submit(new Runnable() {
-                                            @Override
-                                            public void run() {
-                                                feedbackHandler.sendFeedbackCompleted(e);
-                                            }
-                                        });
+                                        try {
+                                            callbackQueue.execute(new Runnable() {
+                                                @Override
+                                                public void run() {
+                                                    feedbackHandler.sendFeedbackCompleted(e);
+                                                }
+                                            });
+                                        } catch (RejectedExecutionException ignored) {
+                                        }
                                     }
                                 },
                                 new PsiphonProviderNetwork() {
@@ -429,7 +418,37 @@ public class PsiphonTunnel {
 
                                     @Override
                                     public String getNetworkID() {
-                                        return PsiphonTunnel.getNetworkID(context);
+
+                                        // startSendFeedback is invoked from the Psiphon UI process, not the Psiphon
+                                        // VPN process.
+                                        //
+                                        // Case 1: no VPN is running
+                                        //
+                                        // isVpnMode = true/false doesn't change the network ID; the network ID will
+                                        // be the physical network ID, and feedback may load existing tactics or may
+                                        // fetch tactics.
+                                        //
+                                        // Case 2: Psiphon VPN is running
+                                        //
+                                        // In principle, we might want to set isVpnMode = true so that we obtain the
+                                        // physical network ID and load any existing tactics. However, as the VPN
+                                        // holds a lock on the data store, the load will fail; also no tactics request
+                                        // is attempted.
+                                        //
+                                        // Hypothetically, if a tactics request did proceed, the tunneled client GeoIP
+                                        // would not reflect the actual client location, and so it's safer to set
+                                        // isVpnMode = false to ensure fetched tactics are stored under a distinct
+                                        // Network ID ("VPN").
+                                        //
+                                        // Case 3: another VPN is running
+                                        //
+                                        // Unlike case 2, there's no Psiphon VPN process holding the data store lock.
+                                        // As with case 2, there's some merit to setting isVpnMode = true in order to
+                                        // load existing tactics, but since a tactics request may proceed, it's safer
+                                        // to set isVpnMode = false and store fetched tactics under a distinct
+                                        // Network ID ("VPN").
+
+                                        return PsiphonTunnel.getNetworkID(context, false);
                                     }
 
                                     @Override
@@ -461,19 +480,25 @@ public class PsiphonTunnel {
                                             }
 
                                             String diagnosticMessage = noticeType + ": " + data.toString();
-                                            callbackQueue.submit(new Runnable() {
-                                                @Override
-                                                public void run() {
-                                                    logger.onDiagnosticMessage(diagnosticMessage);
-                                                }
-                                            });
+                                            try {
+                                                callbackQueue.execute(new Runnable() {
+                                                    @Override
+                                                    public void run() {
+                                                        logger.onDiagnosticMessage(diagnosticMessage);
+                                                    }
+                                                });
+                                            } catch (RejectedExecutionException ignored) {
+                                            }
                                         } catch (java.lang.Exception e) {
-                                            callbackQueue.submit(new Runnable() {
-                                                @Override
-                                                public void run() {
-                                                    logger.onDiagnosticMessage("Error handling notice " + e.toString());
-                                                }
-                                            });
+                                            try {
+                                                callbackQueue.execute(new Runnable() {
+                                                    @Override
+                                                    public void run() {
+                                                        logger.onDiagnosticMessage("Error handling notice " + e.toString());
+                                                    }
+                                                });
+                                            } catch (RejectedExecutionException ignored) {
+                                            }
                                         }
                                     }
                                 },
@@ -481,27 +506,33 @@ public class PsiphonTunnel {
                                 true     // Use hasIPv6Route on Android
                                 );
                     } catch (java.lang.Exception e) {
-                        callbackQueue.submit(new Runnable() {
-                            @Override
-                            public void run() {
-                                feedbackHandler.sendFeedbackCompleted(new Exception("Error sending feedback", e));
-                            }
-                        });
+                        try {
+                            callbackQueue.execute(new Runnable() {
+                                @Override
+                                public void run() {
+                                    feedbackHandler.sendFeedbackCompleted(new Exception("Error sending feedback", e));
+                                }
+                            });
+                        } catch (RejectedExecutionException ignored) {
+                        }
                     }
                 }
             });
         }
 
-        // Interrupt an in-progress feedback upload operation started with startSendFeedback(). This
-        // call is asynchronous and returns a future which is fulfilled when the underlying stop
-        // operation completes.
-        public Future<Void> stopSendFeedback() {
-            return workQueue.submit(new Runnable() {
+        // Interrupt an in-progress feedback upload operation started with startSendFeedback() and shutdown
+        // executor queues.
+        // NOTE: this instance cannot be reused after shutdown() has been called.
+        public void shutdown() {
+            workQueue.execute(new Runnable() {
                 @Override
                 public void run() {
                     Psi.stopSendFeedback();
                 }
-            }, null);
+            });
+
+            shutdownAndAwaitTermination(workQueue);
+            shutdownAndAwaitTermination(callbackQueue);
         }
     }
 
@@ -672,7 +703,7 @@ public class PsiphonTunnel {
 
         @Override
         public String getNetworkID() {
-            return PsiphonTunnel.getNetworkID(mHostService.getContext());
+            return PsiphonTunnel.getNetworkID(mHostService.getContext(), mPsiphonTunnel.isVpnMode());
         }
     }
 
@@ -746,7 +777,7 @@ public class PsiphonTunnel {
         return hasRoute ? 1 : 0;
     }
 
-    private static String getNetworkID(Context context) {
+    private static String getNetworkID(Context context, boolean isVpnMode) {
 
         // TODO: getActiveNetworkInfo is deprecated in API 29; once
         // getActiveNetworkInfo is no longer available, use
@@ -761,10 +792,29 @@ public class PsiphonTunnel {
         String networkID = "UNKNOWN";
 
         ConnectivityManager connectivityManager = (ConnectivityManager)context.getSystemService(Context.CONNECTIVITY_SERVICE);
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            if (!isVpnMode) {
+                NetworkCapabilities capabilities = null;
+                try {
+                    Network nw = connectivityManager.getActiveNetwork();
+                    capabilities = connectivityManager.getNetworkCapabilities(nw);
+                } catch (java.lang.Exception e)  {
+                    // May get exceptions due to missing permissions like android.permission.ACCESS_NETWORK_STATE.
+
+                    // Apps using the Psiphon Library and lacking android.permission.ACCESS_NETWORK_STATE will
+                    // proceed and use tactics, but with "UNKNOWN" as the sole network ID.
+                }
+
+                if (capabilities != null && capabilities.hasTransport(NetworkCapabilities.TRANSPORT_VPN)) {
+                    return "VPN";
+                }
+            }
+        }
+
         NetworkInfo activeNetworkInfo = null;
         try {
             activeNetworkInfo = connectivityManager.getActiveNetworkInfo();
-
         } catch (java.lang.Exception e) {
             // May get exceptions due to missing permissions like android.permission.ACCESS_NETWORK_STATE.
 
@@ -822,6 +872,9 @@ public class PsiphonTunnel {
         mIsWaitingForNetworkConnectivity.set(false);
         mHostService.onDiagnosticMessage("starting Psiphon library");
         try {
+            // mNetworkMonitor.start() will wait up to 1 second before returning to give the network
+            // callback a chance to populate active network properties before we start the tunnel.
+            mNetworkMonitor.start(mHostService.getContext());
             Psi.start(
                     loadPsiphonConfig(mHostService.getContext()),
                     embeddedServerEntries,
@@ -835,7 +888,6 @@ public class PsiphonTunnel {
             throw new Exception("failed to start Psiphon library", e);
         }
 
-        mNetworkMonitor.start(mHostService.getContext());
         mHostService.onDiagnosticMessage("Psiphon library started");
     }
 
@@ -1138,12 +1190,19 @@ public class PsiphonTunnel {
         String region = "";
         TelephonyManager telephonyManager = (TelephonyManager)context.getSystemService(Context.TELEPHONY_SERVICE);
         if (telephonyManager != null) {
-            region = telephonyManager.getSimCountryIso();
-            if (region == null) {
-                region = "";
-            }
-            if (region.length() == 0 && telephonyManager.getPhoneType() != TelephonyManager.PHONE_TYPE_CDMA) {
+            // getNetworkCountryIso, when present, is preferred over
+            // getSimCountryIso, since getNetworkCountryIso is the network
+            // the device is currently on, while getSimCountryIso is the home
+            // region of the SIM. While roaming, only getNetworkCountryIso
+            // may more accurately represent the actual device region.
+            if (telephonyManager.getPhoneType() != TelephonyManager.PHONE_TYPE_CDMA) {
                 region = telephonyManager.getNetworkCountryIso();
+                if (region == null) {
+                    region = "";
+                }
+            }
+            if (region.length() == 0) {
+                region = telephonyManager.getSimCountryIso();
                 if (region == null) {
                     region = "";
                 }
@@ -1396,6 +1455,22 @@ public class PsiphonTunnel {
 
             NetworkRequest networkRequest = networkRequestBuilder.build();
 
+            // There is a potential race condition in which the following
+            // network callback may be invoked, by a worker thread, after
+            // unregisterNetworkCallback. Synchronized access to a local
+            // ArrayList copy avoids the
+            // java.util.ConcurrentModificationException crash we previously
+            // observed when getActiveNetworkDNSServers iterated over the
+            // same ArrayList object value that was modified by the
+            // callback.
+            //
+            // The late invocation of the callback still results in an empty
+            // list of DNS servers, but this behavior has been observed only
+            // in artificial conditions while rapidly starting and stopping
+            // PsiphonTunnel.
+
+            ArrayList<InetAddress> callbackDnsAddresses = new ArrayList<InetAddress>();
+
             final CountDownLatch countDownLatch = new CountDownLatch(1);
             try {
                 ConnectivityManager.NetworkCallback networkCallback =
@@ -1403,7 +1478,9 @@ public class PsiphonTunnel {
                             @Override
                             public void onLinkPropertiesChanged(Network network,
                                                                 LinkProperties linkProperties) {
-                                dnsAddresses.addAll(linkProperties.getDnsServers());
+                                synchronized (callbackDnsAddresses) {
+                                    callbackDnsAddresses.addAll(linkProperties.getDnsServers());
+                                }
                                 countDownLatch.countDown();
                             }
                         };
@@ -1415,6 +1492,10 @@ public class PsiphonTunnel {
                 // Failed to register network callback
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
+            }
+
+            synchronized (callbackDnsAddresses) {
+                dnsAddresses.addAll(callbackDnsAddresses);
             }
         }
 
@@ -1483,23 +1564,14 @@ public class PsiphonTunnel {
     private static class NetworkMonitor {
         private final NetworkChangeListener listener;
         private ConnectivityManager.NetworkCallback networkCallback;
-        private AtomicReference<String> activeNetworkType;
-        private AtomicReference<String> activeNetworkDNSServers;
-        private HostLogger logger;
-
         public NetworkMonitor(
-            NetworkChangeListener listener,
-            AtomicReference<String> activeNetworkType,
-            AtomicReference<String> activeNetworkDNSServers,
-            HostLogger logger) {
-
+            NetworkChangeListener listener) {
             this.listener = listener;
-            this.activeNetworkType = activeNetworkType;
-            this.activeNetworkDNSServers = activeNetworkDNSServers;
-            this.logger = logger;
         }
 
-        private void start(Context context) {
+        private void start(Context context) throws InterruptedException {
+            final CountDownLatch setNetworkPropertiesCountDownLatch = new CountDownLatch(1);
+
             // Need API 21(LOLLIPOP)+ for ConnectivityManager.NetworkCallback
             if (Build.VERSION.SDK_INT < Build.VERSION_CODES.LOLLIPOP) {
                 return;
@@ -1543,9 +1615,9 @@ public class PsiphonTunnel {
 
                     if (network == null) {
 
-                        activeNetworkType.set("NONE");
-                        activeNetworkDNSServers.set("");
-                        logger.onDiagnosticMessage("NetworkMonitor: clear current active network");
+                        mPsiphonTunnel.mActiveNetworkType.set("NONE");
+                        mPsiphonTunnel.mActiveNetworkDNSServers.set("");
+                        mPsiphonTunnel.mHostService.onDiagnosticMessage("NetworkMonitor: clear current active network");
 
                     } else {
 
@@ -1557,14 +1629,16 @@ public class PsiphonTunnel {
                             // mimics the type determination logic in
                             // getNetworkID.
                             NetworkCapabilities capabilities = connectivityManager.getNetworkCapabilities(network);
-                            if (capabilities.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR)) {
+                            if (capabilities.hasTransport(NetworkCapabilities.TRANSPORT_VPN)) {
+                                networkType = "VPN";
+                            } else if (capabilities.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR)) {
                                 networkType = "MOBILE";
                             } else if (capabilities.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)) {
                                 networkType = "WIFI";
                             }
                         } catch (java.lang.Exception e) {
                         }
-                        activeNetworkType.set(networkType);
+                        mPsiphonTunnel.mActiveNetworkType.set(networkType);
 
                         ArrayList<String> servers = new ArrayList<String>();
                         try {
@@ -1580,15 +1654,16 @@ public class PsiphonTunnel {
                         } catch (java.lang.Exception e) {
                         }
                         // Use the workaround, comma-delimited format required for gobind.
-                        activeNetworkDNSServers.set(TextUtils.join(",", servers));
+                        mPsiphonTunnel.mActiveNetworkDNSServers.set(TextUtils.join(",", servers));
 
                         String message = "NetworkMonitor: set current active network " + networkType;
                         if (!servers.isEmpty()) {
                             // The DNS server address is potential PII and not logged.
                             message += " with DNS";
                         }
-                        logger.onDiagnosticMessage(message);
+                        mPsiphonTunnel.mHostService.onDiagnosticMessage(message);
                     }
+                    setNetworkPropertiesCountDownLatch.countDown();
                 }
 
                 @Override
@@ -1642,15 +1717,42 @@ public class PsiphonTunnel {
                     // If we are NOT in the VPN mode then monitor default active networks with the
                     // Internet capability, including VPN, to ensure we won't trigger a reconnect in
                     // case the VPN is up while the system switches the underlying network.
+
+                    // Limitation: for Psiphon Library apps running over Psiphon VPN, or other VPNs
+                    // with a similar architecture, it may be better to trigger a reconnect when
+                    // the underlying physical network changes. When the underlying network
+                    // changes, Psiphon VPN will remain up and reconnect its own tunnel. For the
+                    // Psiphon app, this monitoring will detect no change. However, the Psiphon
+                    // app's tunnel may be lost, and, without network change detection, initiating
+                    // a reconnect will be delayed. For example, if the Psiphon app's tunnel is
+                    // using QUIC, the Psiphon VPN will tunnel that traffic over udpgw. When
+                    // Psiphon VPN reconnects, the egress source address of that UDP flow will
+                    // change -- getting either a different source IP if the Psiphon server
+                    // changes, or a different source port even if the same server -- and the QUIC
+                    // server will drop the packets. The Psiphon app will initiate a reconnect only
+                    // after a SSH keep alive probes timeout or a QUIC timeout.
+                    //
+                    // TODO: Add a second ConnectivityManager/NetworkRequest instance to monitor
+                    // for underlying physical network changes while any VPN remains up.
+
                     builder.removeCapability(NetworkCapabilities.NET_CAPABILITY_NOT_VPN);
                 }
 
                 NetworkRequest networkRequest = builder.build();
+                // We are using requestNetwork and not registerNetworkCallback here because we found
+                // that the callbacks from requestNetwork are more accurate in terms of tracking
+                // currently active network. Another alternative to use for tracking active network
+                // would be registerDefaultNetworkCallback but a) it needs API >= 24 and b) doesn't
+                // provide a way to set up monitoring of underlying networks only when VPN transport
+                // is also active.
                 connectivityManager.requestNetwork(networkRequest, networkCallback);
             } catch (RuntimeException ignored) {
                 // Could be a security exception or any other runtime exception on customized firmwares.
                 networkCallback = null;
             }
+            // We are going to wait up to one second for the network callback to populate
+            // active network properties before returning.
+            setNetworkPropertiesCountDownLatch.await(1, TimeUnit.SECONDS);
         }
 
         private void stop(Context context) {
