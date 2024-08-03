@@ -10,6 +10,10 @@ psiphon has restrictions on outgoing ports and can limit the speed (128 kbytes/s
 You can specify a different server ID. Copy from server-list.dat to client.config.  
 To close the terminal, press Ctrl+C and then y.
 
+[Options List](https://github.com/Psiphon-Labs/psiphon-tunnel-core/blob/master/psiphon/config.go)   
+Upstream proxy:   
+`"UpstreamProxyUrl": "socks5://127.0.0.1:2070"`
+
 ## Download
 Updated official builds:  
 [Windows 7+ x86](https://github.com/Psiphon-Labs/psiphon-tunnel-core-binaries/blob/master/windows/psiphon-tunnel-core-i686.exe)  
